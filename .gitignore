@@ -1,0 +1,13 @@
+# Virtual environments
+.venv/
+venv_spade/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Database (opcjonalnie)
+server.db
+
+# System files
+.DS_Store
