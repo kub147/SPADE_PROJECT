@@ -1,16 +1,20 @@
 # project/agents/tutor_agent.py
-# (FIXED VERSION)
+# (COMPLETE VERSION - INCLUDES DIRECTORY AND MONITOR LOGIC)
 
 import asyncio
 import json
 import random
+import time
 from spade.agent import Agent
-from spade.behaviour import CyclicBehaviour
+from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
 from spade.template import Template
 
 # Protocol definitions (must be consistent)
 PROTOCOL_CONTRACT_NET = "fipa-contract-net"
+PROTOCOL_DIRECTORY = "DirectoryProtocol"
+DIRECTORY_AGENT_JID = "directory@localhost"
+MONITOR_AGENT_JID = "monitor@localhost"
 
 
 class TutorAgent(Agent):
@@ -18,23 +22,45 @@ class TutorAgent(Agent):
     Implements the tutor logic (CNP server).
     - Manages workload (availability).
     - Makes proposals with priority logic.
+    - Registers with the DirectoryAgent on startup.
+    - Reports sessions to the MonitorAgent.
     """
 
     async def setup(self):
         # --- Tutor Profile ---
         self.is_available = True
         self.expertise = self.get("expertise") or []  # Will be set from main.py
-        print(f"{self.name}: Ready. Available: {self.is_available}. Expertise: {self.expertise}")
-
-        # Template to listen for CNP messages
+        self.session_queue_length = 0
+        
+        # --- CNP Behaviour ---
         cnp_template = Template()
         cnp_template.set_metadata("protocol", PROTOCOL_CONTRACT_NET)
-
         self.add_behaviour(self.CNPResponderBehav(), cnp_template)
+
+        # --- Register with Directory Agent ---
+        self.add_behaviour(self.RegisterWithDirectoryBehav())
+        
+        print(f"{self.name}: Ready. Available: {self.is_available}. Expertise: {self.expertise}")
+
+    # --- NEW BEHAVIOUR ---
+    class RegisterWithDirectoryBehav(OneShotBehaviour):
+        """
+        A one-shot behaviour to register the tutor's expertise
+        with the DirectoryAgent upon startup.
+        """
+        async def run(self):
+            print(f"{self.agent.name}: Registering with Directory...")
+            msg = Message(to=DIRECTORY_AGENT_JID)
+            msg.set_metadata("protocol", PROTOCOL_DIRECTORY)
+            msg.set_metadata("performative", "register")
+            msg.body = json.dumps(self.agent.expertise)
+            
+            await self.send(msg)
+            print(f"{self.agent.name}: Registration message sent.")
 
     def can_help(self, topic):
         """Checks if the tutor can help."""
-        return self.is_available and topic in self.expertise
+        return topic in self.expertise
 
     class CNPResponderBehav(CyclicBehaviour):
         """
@@ -54,40 +80,56 @@ class TutorAgent(Agent):
 
                 if self.agent.can_help(topic):
                     print(f"{self.agent.name}: Can help. Sending proposal.")
-                    # --- FIX: Use make_reply() ---
                     reply = msg.make_reply()
                     reply.set_metadata("performative", "propose")
 
                     # --- Priority Logic ---
-                    wait_time = random.randint(1, 10)
+                    wait_time = (self.agent.session_queue_length * 5) + 5 
+
+                    base_expertise = 0.9 if self.agent.is_available else 0.7
 
                     offer = {
                         "wait_time": wait_time,
-                        "expertise_level": 0.9
+                        "expertise_level": base_expertise
                     }
-                    reply.body = json.dumps(offer)  # As per API
+                    reply.body = json.dumps(offer)
                     await self.send(reply)
                 else:
-                    print(f"{self.agent.name}: Cannot help (busy or no expertise).")
+                    print(f"{self.agent.name}: Cannot help (no expertise).")
 
             elif performative == "accept-proposal":
                 # --- Workload Management ---
                 print(f"{self.agent.name}: Proposal ACCEPTED.")
-                self.agent.is_available = False  # Key! Become busy.
+                self.agent.session_queue_length += 1
+                self.agent.is_available = False  
+
+                # --- NEW: Report session start to monitor ---
+                monitor_msg = Message(to=MONITOR_AGENT_JID)
+                monitor_msg.set_metadata("protocol", "MonitorProtocol")
+                monitor_msg.set_metadata("performative", "inform")
+                monitor_msg.body = json.dumps({
+                    "event": "SESSION_START",
+                    "tutor": str(self.agent.jid),
+                    "student": str(msg.sender),
+                    "timestamp": time.time()
+                })
+                await self.send(monitor_msg)
 
                 # Confirm to student
-                # --- FIX: Use make_reply() ---
                 reply = msg.make_reply()
                 reply.set_metadata("performative", "inform")
                 reply.body = "OK, starting session."
                 await self.send(reply)
 
                 # Simulate session
-                print(f"{self.agent.name}: Conducting session...")
+                print(f"{self.agent.name}: Conducting session... (Queue: {self.agent.session_queue_length})")
                 await asyncio.sleep(random.randint(10, 20))  # Session duration
 
-                print(f"{self.agent.name}: Session finished. Becoming available again.")
-                self.agent.is_available = True  # Free up
+                self.agent.session_queue_length -=1
+                if self.agent.session_queue_length ==0:
+                    self.agent.is_available = True  # Free up
+                
+                print(f"{self.agent.name}: Session finished. (Queue: {self.agent.session_queue_length}). Available: {self.agent.is_available}")
 
             elif performative == "reject-proposal":
                 print(f"{self.agent.name}: Proposal REJECTED.")
